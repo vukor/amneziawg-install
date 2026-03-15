@@ -210,6 +210,119 @@ function normalizeIPv6() {
 	echo "${RESULT}"
 }
 
+# Compress a fully expanded IPv6 address to its canonical compressed form (RFC 5952)
+# Replaces the longest run of consecutive zero groups (>= 2) with ::
+# Input should be the output of normalizeIPv6() (8 lowercase groups, no leading zeros)
+# e.g., fd42:42:42:0:0:0:0:2 -> fd42:42:42::2
+function compressIPv6() {
+	local ADDR="$1"
+	local -a IPV6_PARTS
+	IFS=':' read -ra IPV6_PARTS <<< "${ADDR}"
+
+	# Find the longest consecutive run of '0' groups (leftmost if tied)
+	local BEST_START=-1
+	local BEST_LEN=0
+	local CUR_START=-1
+	local CUR_LEN=0
+	local i
+
+	for (( i = 0; i < 8; i++ )); do
+		if [[ "${IPV6_PARTS[$i]}" == "0" ]]; then
+			if (( CUR_START == -1 )); then
+				CUR_START=$i
+				CUR_LEN=1
+			else
+				(( CUR_LEN++ ))
+			fi
+			if (( CUR_LEN > BEST_LEN )); then
+				BEST_START=$CUR_START
+				BEST_LEN=$CUR_LEN
+			fi
+		else
+			CUR_START=-1
+			CUR_LEN=0
+		fi
+	done
+
+	# Per RFC 5952, only compress runs of 2 or more consecutive zero groups
+	if (( BEST_LEN < 2 )); then
+		local IFS=':'
+		echo "${IPV6_PARTS[*]}"
+		return
+	fi
+
+	# Build the compressed address
+	local IFS=':'
+	local LEFT_PARTS=("${IPV6_PARTS[@]:0:$BEST_START}")
+	local RIGHT_PARTS=("${IPV6_PARTS[@]:$((BEST_START + BEST_LEN))}")
+	local LEFT="${LEFT_PARTS[*]}"
+	local RIGHT="${RIGHT_PARTS[*]}"
+
+	echo "${LEFT}::${RIGHT}"
+}
+
+# Optional self-tests for compressIPv6. These are only run when the installer
+# is executed directly with AMNEZIAWG_RUN_IPV6_TESTS=1 in the environment.
+# They are intended to guard against regressions in the RFC 5952 logic.
+function __compressIPv6_expect() {
+	local EXPECTED="$1"
+	local INPUT="$2"
+	local ACTUAL
+
+	ACTUAL="$(compressIPv6 "${INPUT}")"
+	if [[ "${ACTUAL}" != "${EXPECTED}" ]]; then
+		echo "compressIPv6 test failed: input='${INPUT}' expected='${EXPECTED}' got='${ACTUAL}'" >&2
+		return 1
+	fi
+
+	return 0
+}
+
+function run_compressIPv6_tests() {
+	local FAIL=0
+
+	# Addresses that should NOT compress (no run of >= 2 zero groups)
+	__compressIPv6_expect "2001:db8:0:1:2:3:4:5" "2001:db8:0:1:2:3:4:5" || FAIL=1
+	__compressIPv6_expect "2001:db8:0:1:2:3:4:0" "2001:db8:0:1:2:3:4:0" || FAIL=1
+
+	# Simple middle run
+	__compressIPv6_expect "2001:db8::1:0:0:1" "2001:db8:0:0:1:0:0:1" || FAIL=1
+
+	# Leading zero run
+	__compressIPv6_expect "::1:2:3:4:5" "0:0:0:1:2:3:4:5" || FAIL=1
+
+	# Trailing zero run
+	__compressIPv6_expect "2001:db8:1:2:3:4::" "2001:db8:1:2:3:4:0:0" || FAIL=1
+
+	# All zeros
+	__compressIPv6_expect "::" "0:0:0:0:0:0:0:0" || FAIL=1
+
+	# Longest run chosen over shorter one
+	__compressIPv6_expect "2001::1:0:0:1" "2001:0:0:0:1:0:0:1" || FAIL=1
+
+	# Tie case: leftmost longest run wins
+	# Two runs of length 2: positions 1–2 and 4–5
+	# Input: 2001:0:0:1:0:0:1:1 -> expected: 2001::1:0:0:1:1
+	__compressIPv6_expect "2001::1:0:0:1:1" "2001:0:0:1:0:0:1:1" || FAIL=1
+
+	if (( FAIL != 0 )); then
+		echo "compressIPv6 self-tests: FAILED" >&2
+		return 1
+	fi
+
+	echo "compressIPv6 self-tests: OK"
+	return 0
+}
+
+# Only run self-tests when this script is executed directly and explicitly requested.
+if [[ "${BASH_SOURCE[0]}" == "${0}" && "${AMNEZIAWG_RUN_IPV6_TESTS:-0}" == "1" ]]; then
+	if run_compressIPv6_tests; then
+		exit 0
+	else
+		exit 1
+	fi
+fi
+
 function isRoot() {
 	if [[ "${EUID}" -ne 0 ]]; then
 		echo "You need to run this script as root"
@@ -1513,6 +1626,10 @@ function newClient() {
 		CLIENT_DNS="${CLIENT_DNS_1},${CLIENT_DNS_2}"
 	fi
 
+	# Compress IPv6 to canonical RFC 5952 form for client config display
+	local CLIENT_AWG_IPV6_DISPLAY
+	CLIENT_AWG_IPV6_DISPLAY=$(compressIPv6 "${CLIENT_AWG_IPV6}")
+
 	# Restrict umask for client config file creation (contains private key)
 	local OLD_UMASK
 	OLD_UMASK="$(umask)"
@@ -1521,7 +1638,7 @@ function newClient() {
 	# Create client file and add the server as a peer
 	echo "[Interface]
 PrivateKey = ${CLIENT_PRIV_KEY}
-Address = ${CLIENT_AWG_IPV4}/32,${CLIENT_AWG_IPV6}/128
+Address = ${CLIENT_AWG_IPV4}/32,${CLIENT_AWG_IPV6_DISPLAY}/128
 DNS = ${CLIENT_DNS}
 Jc = ${SERVER_AWG_JC}
 Jmin = ${SERVER_AWG_JMIN}
@@ -1766,6 +1883,11 @@ function regenerateClients() {
 			CLIENT_AWG_IPV6=$(echo "${CLIENT_AWG_IPV6_CANDIDATES}" | head -n 1)
 		else
 			CLIENT_AWG_IPV6=""
+		fi
+
+		# Normalize then compress IPv6 for canonical display in regenerated client configs
+		if [[ -n "${CLIENT_AWG_IPV6}" ]]; then
+			CLIENT_AWG_IPV6=$(compressIPv6 "$(normalizeIPv6 "${CLIENT_AWG_IPV6}")")
 		fi
 
 		# Build address string, including IPv6 only if present in AllowedIPs
