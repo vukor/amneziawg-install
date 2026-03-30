@@ -623,8 +623,8 @@ detect_awg_config_dir() {
             # Do not point AWG_CONFIG_DIR at the home directory itself, because
             # later filesystem hardening only grants execute (x) on home dirs,
             # which is insufficient for std::fs::read_dir().  Instead, record the
-            # source home directory so setup_filesystem() can create a dedicated
-            # subdirectory and populate it with symlinks after user confirmation.
+            # source home directory so setup_filesystem() can copy configs into
+            # the system-level AWG_CONFIG_DIR after user confirmation.
             local detected_is_home=0
             case "${dir}" in
                 /root)
@@ -639,17 +639,16 @@ detect_awg_config_dir() {
             esac
 
             if [[ ${detected_is_home} -eq 1 ]]; then
-                # Record the source home directory for deferred subdirectory
-                # creation in setup_filesystem().  Set AWG_CONFIG_DIR to the
-                # target subdirectory path so the rest of the installer sees
-                # the intended final directory (read-only at this stage).
+                # Record the source home directory so setup_filesystem() can
+                # copy configs into the system-level AWG_CONFIG_DIR.  Keep
+                # AWG_CONFIG_DIR at its default (a system directory) so the
+                # web panel does not need access to home directories.
                 AWG_DETECTED_HOME_DIR="${dir}"
-                AWG_CONFIG_DIR="${dir}/amneziawg-clients"
             else
                 AWG_CONFIG_DIR="${dir}"
             fi
 
-            info "Auto-detected AWG client config directory: ${AWG_CONFIG_DIR}"
+            info "Auto-detected AWG client configs in: ${AWG_DETECTED_HOME_DIR:-${AWG_CONFIG_DIR}}"
             return 0
         fi
     done
@@ -725,58 +724,81 @@ setup_filesystem() {
     chown root:root "${ENV_DIR}"
     chmod 0700 "${ENV_DIR}"
 
-    # If auto-detection found configs in a home directory, create the dedicated
-    # subdirectory and populate it with symlinks now (deferred from detect to
+    # If auto-detection found configs in a home directory, copy them into the
+    # system-level AWG_CONFIG_DIR now (deferred from detect_awg_config_dir to
     # avoid filesystem side effects before user confirmation).
-    # Only perform this auto-symlink step if AWG_CONFIG_DIR still matches the
-    # directory derived from the detected home. This avoids acting on stale
-    # detection results when the user has overridden AWG_CONFIG_DIR.
-    if [[ -n "${AWG_DETECTED_HOME_DIR}" ]]; then
-        local expected_dir="${AWG_DETECTED_HOME_DIR}/amneziawg-clients"
-        if [[ "${AWG_CONFIG_DIR}" != "${expected_dir}" ]]; then
-            info "Skipping auto-detected config symlinks: AWG_CONFIG_DIR (${AWG_CONFIG_DIR}) no longer matches ${expected_dir}."
-            AWG_DETECTED_HOME_DIR=""
-        fi
+    # Only perform the copy when AWG_CONFIG_DIR is still the default; if the
+    # user overrode it (via --config-dir or interactive prompt), we must not
+    # blindly copy into an arbitrary directory, and any previously detected
+    # AWG_DETECTED_HOME_DIR must not be used for subsequent ACL/allowlist logic.
+    if [[ -n "${AWG_DETECTED_HOME_DIR}" && "${AWG_CONFIG_DIR}" != "${DEFAULT_AWG_CONFIG_DIR}" ]]; then
+        # Clear stale home-dir detection when the config dir has been overridden.
+        AWG_DETECTED_HOME_DIR=""
     fi
-    if [[ -n "${AWG_DETECTED_HOME_DIR}" ]]; then
+    if [[ -n "${AWG_DETECTED_HOME_DIR}" && "${AWG_CONFIG_DIR}" == "${DEFAULT_AWG_CONFIG_DIR}" ]]; then
         local dest_dir="${AWG_CONFIG_DIR}"
         if [[ ! -d "${dest_dir}" ]]; then
             mkdir -p "${dest_dir}" || {
-                warn "Failed to create ${dest_dir}; skipping auto-detected config symlinks."
+                warn "Failed to create ${dest_dir}; skipping config file copy."
                 AWG_DETECTED_HOME_DIR=""
             }
-            # Best-effort permission tightening; failures here should not abort install.
-            chmod 750 "${dest_dir}" 2>/dev/null || true
+        fi
+        if [[ -d "${dest_dir}" ]]; then
+            if [[ -L "${dest_dir}" ]]; then
+                warn "Config directory ${dest_dir} is a symlink; skipping permission/ownership changes to avoid affecting the symlink target."
+            else
+                chown "root:${SERVICE_USER}" "${dest_dir}" 2>/dev/null || true
+                chmod 750 "${dest_dir}" 2>/dev/null || true
+            fi
         fi
 
         if [[ -n "${AWG_DETECTED_HOME_DIR}" ]]; then
-            # Symlink all matching client configs into the dedicated directory so
-            # the web panel can safely scan them.  Only link real regular files
-            # (not symlinks) to avoid inadvertently granting the service user
-            # read access to arbitrary files outside the intended config set.
-            (
-                shopt -s nullglob
-                for f in "${AWG_DETECTED_HOME_DIR}"/awg*-client-*.conf; do
-                    if [[ -f "${f}" && ! -L "${f}" && -r "${f}" ]]; then
-                        link_name="${dest_dir}/$(basename "${f}")"
-                        # Do not overwrite existing non-symlink files.
-                        if [[ -e "${link_name}" && ! -L "${link_name}" ]]; then
-                            warn "Skipping ${f}: destination ${link_name} already exists and is not a symlink."
+            # Copy all matching client configs into the config directory so
+            # the web panel can read them without traversing home directories.
+            # Only copy real regular files (not symlinks) to avoid
+            # inadvertently exposing arbitrary files.
+            local copy_count=0
+            local _saved_nullglob
+            _saved_nullglob=$(shopt -p nullglob 2>/dev/null || true)
+            shopt -s nullglob
+            for f in "${AWG_DETECTED_HOME_DIR}"/awg*-client-*.conf; do
+                if [[ -f "${f}" && ! -L "${f}" && -r "${f}" ]]; then
+                    dest_name="${dest_dir}/$(basename "${f}")"
+                    # Do not overwrite existing regular files.
+                    if [[ -e "${dest_name}" && ! -L "${dest_name}" ]]; then
+                        warn "Skipping ${f}: destination ${dest_name} already exists."
+                        continue
+                    fi
+                    # If a symlink exists at the destination, remove it so cp
+                    # cannot follow it and overwrite an arbitrary target.
+                    if [[ -L "${dest_name}" ]]; then
+                        warn "Removing symlink at ${dest_name} before copying ${f}."
+                        if ! rm -f "${dest_name}" 2>/dev/null; then
+                            warn "Failed to remove symlink at ${dest_name}; skipping copy of ${f} to avoid following symlink."
                             continue
                         fi
-                        # If symlink already points to the same target, skip.
-                        if [[ -L "${link_name}" ]]; then
-                            existing_target="$(readlink -f "${link_name}" 2>/dev/null || true)"
-                            new_target="$(readlink -f "${f}" 2>/dev/null || true)"
-                            if [[ -n "${existing_target}" && "${existing_target}" == "${new_target}" ]]; then
-                                continue
-                            fi
+                        # If the destination is still a symlink after attempted removal, skip to avoid following it.
+                        if [[ -L "${dest_name}" ]]; then
+                            warn "Destination ${dest_name} remains a symlink after removal attempt; skipping copy of ${f}."
+                            continue
                         fi
-                        ln -sf "${f}" "${link_name}" 2>/dev/null || true
                     fi
-                done
-            )
-            info "Symlinked client configs from ${AWG_DETECTED_HOME_DIR} into ${dest_dir}."
+                    if cp -f "${f}" "${dest_name}" 2>/dev/null; then
+                        # Only adjust permissions on a real regular file we just created.
+                        if [[ -f "${dest_name}" && ! -L "${dest_name}" ]]; then
+                            chmod 640 "${dest_name}" 2>/dev/null || true
+                            chown "root:${SERVICE_USER}" "${dest_name}" 2>/dev/null || true
+                        fi
+                        copy_count=$((copy_count + 1))
+                    fi
+                fi
+            done
+            eval "${_saved_nullglob}"
+            if [[ "${copy_count}" -gt 0 ]]; then
+                info "Copied ${copy_count} client config(s) from ${AWG_DETECTED_HOME_DIR} into ${dest_dir}."
+            else
+                warn "No client configs were copied from ${AWG_DETECTED_HOME_DIR} into ${dest_dir}. Check permissions and available files."
+            fi
         fi
     fi
 
