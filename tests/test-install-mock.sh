@@ -1179,6 +1179,131 @@ bash "${WEB_INSTALLER_IMPL}" \
 rm -rf "${HOME_CONFIG_DIR}"
 
 echo ""
+echo "--- Web installer: auto-detect AWG_CONFIG_DIR ---"
+
+# When --config-dir is not passed, the installer should auto-detect the
+# directory containing awg*-client-*.conf files and write it to AWG_CONFIG_DIR
+# in the env file.  When configs are found in a home directory (/root),
+# auto-detection creates a dedicated subdirectory and symlinks configs there
+# so the web panel can safely use read_dir() with rx ACLs.
+AUTODETECT_HOME="/root"
+AUTODETECT_EXPECTED_DIR="${AUTODETECT_HOME}/amneziawg-clients"
+AUTODETECT_CONF="${AUTODETECT_HOME}/awg0-client-autotest.conf"
+
+# Create a fake AWG client config with an [Interface] section
+cat >"${AUTODETECT_CONF}" <<'CONFEOF'
+[Interface]
+PrivateKey = fake+key+for+testing=
+Address = 10.0.0.2/32
+CONFEOF
+chmod 600 "${AUTODETECT_CONF}"
+
+WEB_AUTODETECT_RC=0
+WEB_AUTODETECT_OUTPUT=$(SUDO_USER="" bash "${WEB_INSTALLER_IMPL}" \
+	--non-interactive \
+	--force \
+	--binary-src "${STUB_BINARY}" \
+	--install-dir "${WEB_TEST_INSTALL_DIR}" \
+	--data-dir "${WEB_TEST_DATA_DIR}" \
+	--env-file "${WEB_TEST_ENV_FILE}" \
+	--username testadmin \
+	--password-hash "${TEST_PASSWORD_HASH}" \
+	--no-start --no-enable 2>&1) || WEB_AUTODETECT_RC=$?
+
+if [[ ${WEB_AUTODETECT_RC} -eq 0 ]]; then
+	echo "OK: Installer with auto-detection succeeded"
+else
+	echo "FAIL: Installer with auto-detection exited non-zero (rc=${WEB_AUTODETECT_RC})"
+	echo "  Output tail: $(echo "${WEB_AUTODETECT_OUTPUT}" | tail -20)"
+	FAILED=$((FAILED + 1))
+fi
+
+# Verify auto-detected AWG_CONFIG_DIR points to the dedicated subdirectory (not the home dir)
+if grep -q "^AWG_CONFIG_DIR=${AUTODETECT_EXPECTED_DIR}$" "${WEB_TEST_ENV_FILE}" 2>/dev/null; then
+	echo "OK: AWG_CONFIG_DIR auto-detected as ${AUTODETECT_EXPECTED_DIR} (dedicated subdir, not home)"
+else
+	echo "FAIL: AWG_CONFIG_DIR not auto-detected; expected ${AUTODETECT_EXPECTED_DIR}"
+	echo "  Got: $(grep 'AWG_CONFIG_DIR=' "${WEB_TEST_ENV_FILE}" 2>/dev/null || echo 'not found')"
+	FAILED=$((FAILED + 1))
+fi
+
+# Verify symlink was created in the dedicated subdirectory
+if [[ -L "${AUTODETECT_EXPECTED_DIR}/awg0-client-autotest.conf" ]]; then
+	echo "OK: Symlink created in ${AUTODETECT_EXPECTED_DIR}"
+else
+	echo "FAIL: Expected symlink ${AUTODETECT_EXPECTED_DIR}/awg0-client-autotest.conf not found"
+	FAILED=$((FAILED + 1))
+fi
+
+# Verify the service user can actually read the config through the symlink.
+# This catches permission regressions where ACLs are not applied to the real
+# target file (the original config is typically mode 600).
+# The assertion requires setfacl to be installed: without it the installer
+# cannot grant the service user access to /root or the symlink targets, so
+# read access is expected to fail and we skip instead of reporting a false FAIL.
+WEB_SERVICE_USER="awg-web"
+if ! command -v setfacl >/dev/null 2>&1; then
+	echo "SKIP: setfacl not installed; cannot verify ACL-based read access through symlink"
+elif ! id "${WEB_SERVICE_USER}" &>/dev/null; then
+	echo "SKIP: Service user ${WEB_SERVICE_USER} does not exist; cannot verify read access"
+elif ! command -v runuser >/dev/null 2>&1; then
+	echo "SKIP: runuser not installed; cannot verify read access as service user"
+elif runuser -u "${WEB_SERVICE_USER}" -- cat "${AUTODETECT_EXPECTED_DIR}/awg0-client-autotest.conf" >/dev/null 2>&1; then
+	echo "OK: Service user ${WEB_SERVICE_USER} can read config through symlink"
+else
+	echo "FAIL: Service user ${WEB_SERVICE_USER} cannot read config through symlink"
+	echo "  Symlink target perms: $(stat -c '%a' "${AUTODETECT_CONF}" 2>/dev/null || echo 'N/A')"
+	echo "  ACL on target: $(getfacl -p "${AUTODETECT_CONF}" 2>/dev/null | grep "${WEB_SERVICE_USER}" || echo 'none')"
+	FAILED=$((FAILED + 1))
+fi
+
+# Verify the auto-detection was logged
+if echo "${WEB_AUTODETECT_OUTPUT}" | grep -q "Auto-detected AWG client config directory"; then
+	echo "OK: Auto-detection logged in output"
+else
+	echo "FAIL: Auto-detection message not found in output"
+	FAILED=$((FAILED + 1))
+fi
+
+# Verify ProtectHome was relaxed for /root config dir and that this run changed it
+if grep -q "^ProtectHome=read-only" /etc/systemd/system/amneziawg-web.service 2>/dev/null && \
+	echo "${WEB_AUTODETECT_OUTPUT}" | grep -q "ProtectHome"; then
+	echo "OK: ProtectHome=read-only when config dir is under /root and change logged by installer"
+else
+	echo "FAIL: ProtectHome should be read-only when config dir is under /root and change should be logged"
+	echo "  Unit file ProtectHome line: $(grep 'ProtectHome=' /etc/systemd/system/amneziawg-web.service 2>/dev/null || echo 'not found')"
+	echo "  Installer output (grep ProtectHome): $(echo "${WEB_AUTODETECT_OUTPUT}" | grep -i 'ProtectHome' || echo 'no ProtectHome log found')"
+	FAILED=$((FAILED + 1))
+fi
+
+rm -f "${AUTODETECT_CONF}"
+
+# Clean up the dedicated subdirectory and any ACL entries on /root left by the test.
+rm -rf "${AUTODETECT_EXPECTED_DIR}"
+if command -v setfacl >/dev/null 2>&1; then
+	setfacl -x "u:${WEB_SERVICE_USER}" /root 2>/dev/null || true
+fi
+
+# Restore the original config dir for subsequent tests
+WEB_RESTORE_RC=0
+bash "${WEB_INSTALLER_IMPL}" \
+	--non-interactive \
+	--force \
+	--binary-src "${STUB_BINARY}" \
+	--install-dir "${WEB_TEST_INSTALL_DIR}" \
+	--data-dir "${WEB_TEST_DATA_DIR}" \
+	--env-file "${WEB_TEST_ENV_FILE}" \
+	--config-dir "${WEB_TEST_AWG_CONFIG_DIR}" \
+	--username testadmin \
+	--password-hash "${TEST_PASSWORD_HASH}" \
+	--no-start --no-enable >/dev/null 2>&1 || WEB_RESTORE_RC=$?
+
+if [[ ${WEB_RESTORE_RC} -ne 0 ]]; then
+	echo "FAIL: Restore of original config dir failed (rc=${WEB_RESTORE_RC})"
+	FAILED=$((FAILED + 1))
+fi
+
+echo ""
 echo "--- Web installer: sudoers drop-in ---"
 
 # Verify sudoers file was installed

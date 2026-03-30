@@ -75,7 +75,12 @@ adjust_unit_hardening() {
 
     [[ -f "${unit_file}" ]] || return 0
 
-    # Normalize: strip trailing slashes for consistent comparison
+    # Normalize: resolve symlinks and strip trailing slashes so the case
+    # checks match the actual filesystem location.
+    local resolved
+    if resolved="$(readlink -f -- "${config_dir}" 2>/dev/null)"; then
+        config_dir="${resolved}"
+    fi
     config_dir="${config_dir%/}"
 
     # 1. Update ReadOnlyPaths to include the actual config directory
@@ -85,17 +90,29 @@ adjust_unit_hardening() {
         current_ro="${current_ro%/}"
         if [[ "${config_dir}" != "${current_ro}" ]] \
                 && [[ "${config_dir}" != "${current_ro}/"* ]]; then
-            sed -i "s|^ReadOnlyPaths=.*|ReadOnlyPaths=${config_dir}|" "${unit_file}"
+            # Escape sed replacement metacharacters (& and the | delimiter)
+            # to prevent path contents from corrupting the unit file.
+            local escaped_dir="${config_dir//&/\\&}"
+            escaped_dir="${escaped_dir//|/\\|}"
+            sed -i "s|^ReadOnlyPaths=.*|ReadOnlyPaths=${escaped_dir}|" "${unit_file}"
             info "Updated ReadOnlyPaths to ${config_dir}"
         fi
     fi
 
-    # 2. If the config directory lives under /home, relax ProtectHome
+    # 2. Make ProtectHome deterministic based on the current config_dir:
+    #    - For /home or /root paths: relax to read-only so the service can read configs.
+    #    - For all other paths: ensure ProtectHome=yes for maximum sandboxing.
     case "${config_dir}" in
-        /home|/home/*)
+        /root|/root/*|/home|/home/*)
             if grep -q '^ProtectHome=yes' "${unit_file}" 2>/dev/null; then
                 sed -i 's|^ProtectHome=yes|ProtectHome=read-only|' "${unit_file}"
-                info "Changed ProtectHome to read-only (config dir is under /home)."
+                info "Changed ProtectHome to read-only (config dir is under /home or /root)."
+            fi
+            ;;
+        *)
+            if grep -q '^ProtectHome=read-only' "${unit_file}" 2>/dev/null; then
+                sed -i 's|^ProtectHome=read-only|ProtectHome=yes|' "${unit_file}"
+                info "Restored ProtectHome to yes (config dir is not under /home or /root)."
             fi
             ;;
     esac
