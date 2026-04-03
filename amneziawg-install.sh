@@ -126,6 +126,11 @@ SERVER_AWG_H1=$(safeQuoteParam "${SERVER_AWG_H1}")
 SERVER_AWG_H2=$(safeQuoteParam "${SERVER_AWG_H2}")
 SERVER_AWG_H3=$(safeQuoteParam "${SERVER_AWG_H3}")
 SERVER_AWG_H4=$(safeQuoteParam "${SERVER_AWG_H4}")
+SERVER_AWG_I1=$(safeQuoteParam "${SERVER_AWG_I1}")
+SERVER_AWG_I2=$(safeQuoteParam "${SERVER_AWG_I2}")
+SERVER_AWG_I3=$(safeQuoteParam "${SERVER_AWG_I3}")
+SERVER_AWG_I4=$(safeQuoteParam "${SERVER_AWG_I4}")
+SERVER_AWG_I5=$(safeQuoteParam "${SERVER_AWG_I5}")
 EOF
 	umask "${OLD_UMASK}"
 }
@@ -979,6 +984,16 @@ function installQuestions() {
 		SERVER_AWG_H3="${RANDOM_AWG_H3_MIN}-${RANDOM_AWG_H3_MAX}"
 		SERVER_AWG_H4="${RANDOM_AWG_H4_MIN}-${RANDOM_AWG_H4_MAX}"
 
+		# I1-I5 must be provided via environment variables in AUTO_INSTALL mode.
+		# Generate them at https://architect.vai-rice.space/
+		if [[ -z "${SERVER_AWG_I1}" ]] || [[ -z "${SERVER_AWG_I2}" ]] || \
+		   [[ -z "${SERVER_AWG_I3}" ]] || [[ -z "${SERVER_AWG_I4}" ]] || \
+		   [[ -z "${SERVER_AWG_I5}" ]]; then
+			echo -e "${RED}ERROR: SERVER_AWG_I1 through SERVER_AWG_I5 must be set in AUTO_INSTALL mode.${NC}"
+			echo -e "${ORANGE}Generate I1-I5 values at https://architect.vai-rice.space/${NC}"
+			exit 1
+		fi
+
 		return
 	fi
 
@@ -1000,6 +1015,11 @@ function installQuestions() {
 	SERVER_AWG_S2=""
 	SERVER_AWG_S3=""
 	SERVER_AWG_S4=""
+	SERVER_AWG_I1=""
+	SERVER_AWG_I2=""
+	SERVER_AWG_I3=""
+	SERVER_AWG_I4=""
+	SERVER_AWG_I5=""
 
 	echo "AmneziaWG server installer (https://github.com/wiresock/amneziawg-install)"
 	echo ""
@@ -1114,6 +1134,19 @@ function installQuestions() {
 	echo -e "\n${GREEN}H1-H4 Ranged Headers (ranges must not overlap):${NC}"
 	generateH1AndH2AndH3AndH4Ranges
 	readH1AndH2AndH3AndH4Ranges
+
+	# I1-I5 Obfuscation Instructions (AmneziaWG 2.0)
+	# Generate I1-I5 values at https://architect.vai-rice.space/
+	echo -e "\n${GREEN}I1-I5 Obfuscation Instructions (AmneziaWG 2.0):${NC}"
+	echo -e "${ORANGE}Generate I1-I5 values at https://architect.vai-rice.space/${NC}"
+	for I_NUM in 1 2 3 4 5; do
+		local I_VAR="SERVER_AWG_I${I_NUM}"
+		local I_VALUE=""
+		until [[ -n "${I_VALUE}" ]]; do
+			read -rp "Server AmneziaWG I${I_NUM}: " -e I_VALUE
+		done
+		printf -v "${I_VAR}" '%s' "${I_VALUE}"
+	done
 
 	echo ""
 	echo "Okay, that was all I needed. We are ready to setup your AmneziaWG server now."
@@ -1372,7 +1405,12 @@ S4 = ${SERVER_AWG_S4}
 H1 = ${SERVER_AWG_H1}
 H2 = ${SERVER_AWG_H2}
 H3 = ${SERVER_AWG_H3}
-H4 = ${SERVER_AWG_H4}" >"${SERVER_AWG_CONF}"
+H4 = ${SERVER_AWG_H4}
+I1 = ${SERVER_AWG_I1}
+I2 = ${SERVER_AWG_I2}
+I3 = ${SERVER_AWG_I3}
+I4 = ${SERVER_AWG_I4}
+I5 = ${SERVER_AWG_I5}" >"${SERVER_AWG_CONF}"
 	chmod 600 "${SERVER_AWG_CONF}"
 
 	# Restore default umask before creating system files and running services
@@ -1705,6 +1743,11 @@ H1 = ${SERVER_AWG_H1}
 H2 = ${SERVER_AWG_H2}
 H3 = ${SERVER_AWG_H3}
 H4 = ${SERVER_AWG_H4}
+I1 = ${SERVER_AWG_I1}
+I2 = ${SERVER_AWG_I2}
+I3 = ${SERVER_AWG_I3}
+I4 = ${SERVER_AWG_I4}
+I5 = ${SERVER_AWG_I5}
 
 [Peer]
 PublicKey = ${SERVER_PUB_KEY}
@@ -2082,6 +2125,11 @@ H1 = ${SERVER_AWG_H1}
 H2 = ${SERVER_AWG_H2}
 H3 = ${SERVER_AWG_H3}
 H4 = ${SERVER_AWG_H4}
+I1 = ${SERVER_AWG_I1}
+I2 = ${SERVER_AWG_I2}
+I3 = ${SERVER_AWG_I3}
+I4 = ${SERVER_AWG_I4}
+I5 = ${SERVER_AWG_I5}
 
 [Peer]
 PublicKey = ${SERVER_PUB_KEY}
