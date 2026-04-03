@@ -223,6 +223,38 @@ Backups are restored automatically if migration fails.
 
 ---
 
+## 🔀 Split Tunneling (ip-list.txt)
+
+When adding a new client interactively, the installer will ask whether to use split tunneling if an `ip-list.txt` file is present in the same directory as the script. If enabled, only the IPs listed in the file are routed through the VPN; all other traffic goes directly.
+
+**How to generate `ip-list.txt`:**
+
+1. Open **[iplist.opencck.org](https://iplist.opencck.org/)**
+2. Set **Format** to `Comma`
+3. Select the categories (sites/services) you want routed through the VPN
+4. Click **Save as file** — this downloads the IP list as a text file
+5. Place the downloaded file in the repo root and rename it to `ip-list.txt`
+
+When the script detects `ip-list.txt`, it prompts:
+
+```
+Use split tunneling for this client? [y/n]:
+```
+
+- Answer `y` — the client config's `AllowedIPs` is set to the contents of `ip-list.txt` (only those IPs go through the VPN)
+- Answer `n` — the default `AllowedIPs` is used (all traffic goes through the VPN)
+
+> **Note:** `ip-list.txt` only affects the **client config** — the server config is not modified.
+
+---
+
+## Useful Links
+
+- **[AmneziaWG Architect](https://architect.vai-rice.space/)** — Web-based configuration generator for AmneziaWG. Helps you build client and server configs visually without editing files manually.
+- **[IP Address Collection (iplist.opencck.org)](https://iplist.opencck.org/)** — Service for browsing and downloading curated IP address lists by portal/group. Useful for configuring split-tunneling or `ALLOWED_IPS` with specific services.
+
+---
+
 ## Credits
 
 Fork of [RomikB/amneziawg-install](https://github.com/RomikB/amneziawg-install).

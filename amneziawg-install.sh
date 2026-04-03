@@ -1704,6 +1704,33 @@ function newClient() {
 		CLIENT_AWG_IPV6=$(normalizeIPv6 "${BASE_IPV6}::${DOT_IP}")
 	fi
 
+	# Determine AllowedIPs for this client config only.
+	# In AUTO_INSTALL mode, always use the server default.
+	# In interactive mode, ask whether to use split tunneling via ip-list.txt.
+	local CLIENT_ALLOWED_IPS="${ALLOWED_IPS}"
+	if [[ "${AUTO_INSTALL,,}" != "y" ]]; then
+		local SCRIPT_DIR
+		SCRIPT_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+		local IP_LIST_FILE="${SCRIPT_DIR}/ip-list.txt"
+		if [[ -f "${IP_LIST_FILE}" ]]; then
+			echo ""
+			echo -e "Split tunneling routes only specific IPs through the VPN (using ip-list.txt)."
+			local USE_SPLIT_TUNNEL=""
+			until [[ "${USE_SPLIT_TUNNEL}" =~ ^[yYnN]$ ]]; do
+				read -rp "Use split tunneling for this client? [y/n]: " -e USE_SPLIT_TUNNEL
+			done
+			if [[ "${USE_SPLIT_TUNNEL}" =~ ^[yY]$ ]]; then
+				local IP_LIST_CONTENT
+				IP_LIST_CONTENT="$(tr -d '\n\r' <"${IP_LIST_FILE}" | sed 's/[[:space:]]\+/ /g; s/^[[:space:]]*//; s/[[:space:]]*$//')"
+				if [[ -n "${IP_LIST_CONTENT}" ]]; then
+					CLIENT_ALLOWED_IPS="${IP_LIST_CONTENT}"
+				else
+					echo -e "${ORANGE}Warning: ip-list.txt is empty. Using default AllowedIPs.${NC}"
+				fi
+			fi
+		fi
+	fi
+
 	# Generate key pair for the client
 	CLIENT_PRIV_KEY=$(awg genkey)
 	CLIENT_PUB_KEY=$(echo "${CLIENT_PRIV_KEY}" | awg pubkey)
@@ -1753,7 +1780,7 @@ I5 = ${SERVER_AWG_I5}
 PublicKey = ${SERVER_PUB_KEY}
 PresharedKey = ${CLIENT_PRE_SHARED_KEY}
 Endpoint = ${ENDPOINT}
-AllowedIPs = ${ALLOWED_IPS}" >"${HOME_DIR}/${SERVER_AWG_NIC}-client-${CLIENT_NAME}.conf"
+AllowedIPs = ${CLIENT_ALLOWED_IPS}" >"${HOME_DIR}/${SERVER_AWG_NIC}-client-${CLIENT_NAME}.conf"
 
 	# Restore default umask
 	umask "${OLD_UMASK}"
