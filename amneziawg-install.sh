@@ -1405,7 +1405,12 @@ S4 = ${SERVER_AWG_S4}
 H1 = ${SERVER_AWG_H1}
 H2 = ${SERVER_AWG_H2}
 H3 = ${SERVER_AWG_H3}
-H4 = ${SERVER_AWG_H4}" >"${SERVER_AWG_CONF}"
+H4 = ${SERVER_AWG_H4}
+I1 = ${SERVER_AWG_I1}
+I2 = ${SERVER_AWG_I2}
+I3 = ${SERVER_AWG_I3}
+I4 = ${SERVER_AWG_I4}
+I5 = ${SERVER_AWG_I5}" >"${SERVER_AWG_CONF}"
 	chmod 600 "${SERVER_AWG_CONF}"
 
 	# Restore default umask before creating system files and running services
